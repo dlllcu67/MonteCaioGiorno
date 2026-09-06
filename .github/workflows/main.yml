@@ -2,11 +2,9 @@ name: Save Webcam Image
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # Ogni 30 minuti
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
-# Evita che due esecuzioni modifichino contemporaneamente
-# la stessa GitHub Release.
 concurrency:
   group: webcam-archive
   cancel-in-progress: false
@@ -15,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  download:
+  webcam:
     runs-on: ubuntu-latest
 
     env:
@@ -23,33 +21,23 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
 
-      # Coordinate Monte Caio
+      # Monte Caio-Schia - Tizzano Val Parma (PR)
       LATITUDE: "44.4643"
       LONGITUDE: "10.1607"
 
     steps:
 
-      # ------------------------------------------------------------
-      # 1. Controlla il crepuscolo civile
-      #
-      # Inizio acquisizione:
-      # alba civile (sole a -6°) mattutina
-      #
-      # Fine acquisizione:
-      # tramonto civile (sole a -6°) serale
-      # ------------------------------------------------------------
-      - name: Controlla crepuscolo civile
+      # ============================================================
+      # 1. CALCOLO CREPUSCOLO CIVILE
+      # ============================================================
+      - name: Calcola finestra di acquisizione
+        id: sunlight
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=========================================="
-          echo "Controllo crepuscolo civile"
-          echo "=========================================="
-
-          python3 - <<'PY'
+          python3 <<'PY'
           import os
-          import sys
           import math
           from datetime import datetime, timezone
           from zoneinfo import ZoneInfo
@@ -57,184 +45,228 @@ jobs:
           latitude = float(os.environ["LATITUDE"])
           longitude = float(os.environ["LONGITUDE"])
 
-          tz = ZoneInfo("Europe/Rome")
-          now = datetime.now(tz)
+          local_tz = ZoneInfo("Europe/Rome")
+          now = datetime.now(local_tz)
 
-          print(f"Ora italiana: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-          print(f"Coordinate:   {latitude}, {longitude}")
+          print("==========================================")
+          print("CONTROLLO CREPUSCOLO CIVILE")
+          print("==========================================")
+          print(f"Data/ora:   {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+          print(f"Latitudine: {latitude}")
+          print(f"Longitudine:{longitude}")
+          print("==========================================")
 
-          # --------------------------------------------------------
-          # Calcolo del crepuscolo civile.
-          #
-          # Il crepuscolo civile termina quando il Sole scende
-          # sotto i -6° di altezza.
-          #
-          # Usiamo l'algoritmo NOAA.
-          # --------------------------------------------------------
 
-          def calculate_civil_twilight(date, latitude, longitude):
+          def solar_event(date, latitude, longitude, zenith, sunrise):
+              """
+              Calcolo di un evento solare tramite algoritmo NOAA.
 
-              N = date.timetuple().tm_yday
-              lng_hour = longitude / 15.0
+              Per il crepuscolo civile:
+              zenith = 96 gradi
+              equivalente a Sole a -6 gradi.
+              """
 
-              # -6° = crepuscolo civile
-              zenith = 90.0 + 6.0
+              day_of_year = date.timetuple().tm_yday
+              longitude_hour = longitude / 15.0
 
-              def calc(is_morning):
-
-                  if is_morning:
-                      t = N + ((6 - lng_hour) / 24)
-                  else:
-                      t = N + ((18 - lng_hour) / 24)
-
-                  M = (0.9856 * t) - 3.289
-
-                  L = (
-                      M
-                      + (1.916 * math.sin(math.radians(M)))
-                      + (0.020 * math.sin(math.radians(2 * M)))
-                      + 282.634
-                  ) % 360
-
-                  RA = math.degrees(
-                      math.atan(
-                          0.91764 *
-                          math.tan(math.radians(L))
-                      )
-                  ) % 360
-
-                  Lquadrant = (
-                      math.floor(L / 90)
-                  ) * 90
-
-                  RAquadrant = (
-                      math.floor(RA / 90)
-                  ) * 90
-
-                  RA = RA + (Lquadrant - RAquadrant)
-                  RA /= 15
-
-                  sin_dec = (
-                      0.39782 *
-                      math.sin(math.radians(L))
+              if sunrise:
+                  approximate_time = (
+                      day_of_year
+                      + ((6.0 - longitude_hour) / 24.0)
+                  )
+              else:
+                  approximate_time = (
+                      day_of_year
+                      + ((18.0 - longitude_hour) / 24.0)
                   )
 
-                  cos_dec = math.cos(
-                      math.asin(sin_dec)
+              mean_anomaly = (
+                  0.9856 * approximate_time
+              ) - 3.289
+
+              sun_longitude = (
+                  mean_anomaly
+                  + (
+                      1.916
+                      * math.sin(math.radians(mean_anomaly))
                   )
-
-                  cos_h = (
-                      math.cos(math.radians(zenith))
-                      - (
-                          sin_dec *
-                          math.sin(math.radians(latitude))
-                      )
-                  ) / (
-                      cos_dec *
-                      math.cos(math.radians(latitude))
-                  )
-
-                  # Nessun evento astronomico
-                  if cos_h > 1 or cos_h < -1:
-                      return None
-
-                  if is_morning:
-                      H = 360 - math.degrees(
-                          math.acos(cos_h)
-                      )
-                  else:
-                      H = math.degrees(
-                          math.acos(cos_h)
-                      )
-
-                  H /= 15
-
-                  T = (
-                      H
-                      + RA
-                      - (0.06571 * t)
-                      - 6.622
-                  )
-
-                  UT = (T - lng_hour) % 24
-
-                  hours = int(UT)
-
-                  minutes_float = (
-                      UT - hours
-                  ) * 60
-
-                  minutes = int(minutes_float)
-
-                  seconds = int(
-                      round(
-                          (minutes_float - minutes) * 60
+                  + (
+                      0.020
+                      * math.sin(
+                          math.radians(2 * mean_anomaly)
                       )
                   )
+                  + 282.634
+              )
 
-                  if seconds >= 60:
-                      seconds = 0
-                      minutes += 1
+              sun_longitude %= 360.0
 
-                  if minutes >= 60:
-                      minutes = 0
-                      hours = (hours + 1) % 24
+              right_ascension = math.degrees(
+                  math.atan(
+                      0.91764
+                      * math.tan(
+                          math.radians(sun_longitude)
+                      )
+                  )
+              )
 
-                  return datetime(
-                      date.year,
-                      date.month,
-                      date.day,
-                      hours,
-                      minutes,
-                      seconds,
-                      tzinfo=timezone.utc
+              right_ascension %= 360.0
+
+              longitude_quadrant = (
+                  math.floor(sun_longitude / 90.0)
+                  * 90.0
+              )
+
+              ra_quadrant = (
+                  math.floor(right_ascension / 90.0)
+                  * 90.0
+              )
+
+              right_ascension += (
+                  longitude_quadrant
+                  - ra_quadrant
+              )
+
+              right_ascension /= 15.0
+
+              sin_declination = (
+                  0.39782
+                  * math.sin(
+                      math.radians(sun_longitude)
+                  )
+              )
+
+              cos_declination = math.cos(
+                  math.asin(sin_declination)
+              )
+
+              cos_hour_angle = (
+                  math.cos(math.radians(zenith))
+                  - (
+                      sin_declination
+                      * math.sin(math.radians(latitude))
+                  )
+              ) / (
+                  cos_declination
+                  * math.cos(math.radians(latitude))
+              )
+
+              # Nessun evento solare calcolabile
+              if cos_hour_angle > 1.0:
+                  return None
+
+              if cos_hour_angle < -1.0:
+                  return None
+
+              if sunrise:
+                  hour_angle = (
+                      360.0
+                      - math.degrees(
+                          math.acos(cos_hour_angle)
+                      )
+                  )
+              else:
+                  hour_angle = math.degrees(
+                      math.acos(cos_hour_angle)
                   )
 
-              morning = calc(True)
-              evening = calc(False)
+              hour_angle /= 15.0
 
-              return morning, evening
+              local_mean_time = (
+                  hour_angle
+                  + right_ascension
+                  - (0.06571 * approximate_time)
+                  - 6.622
+              )
+
+              utc_hour = (
+                  local_mean_time
+                  - longitude_hour
+              ) % 24.0
+
+              hours = int(utc_hour)
+
+              minutes_float = (
+                  utc_hour - hours
+              ) * 60.0
+
+              minutes = int(minutes_float)
+
+              seconds = int(
+                  round(
+                      (minutes_float - minutes)
+                      * 60.0
+                  )
+              )
+
+              if seconds >= 60:
+                  seconds = 0
+                  minutes += 1
+
+              if minutes >= 60:
+                  minutes = 0
+                  hours += 1
+
+              hours %= 24
+
+              return datetime(
+                  date.year,
+                  date.month,
+                  date.day,
+                  hours,
+                  minutes,
+                  seconds,
+                  tzinfo=timezone.utc
+              )
 
 
-          morning_utc, evening_utc = calculate_civil_twilight(
+          # ========================================================
+          # Crepuscolo civile
+          # Sole a -6°
+          # ========================================================
+
+          CIVIL_ZENITH = 96.0
+
+          civil_dawn_utc = solar_event(
               now.date(),
               latitude,
-              longitude
+              longitude,
+              CIVIL_ZENITH,
+              True
+          )
+
+          civil_dusk_utc = solar_event(
+              now.date(),
+              latitude,
+              longitude,
+              CIVIL_ZENITH,
+              False
           )
 
 
-          # --------------------------------------------------------
-          # Controllo risultato
-          # --------------------------------------------------------
-
-          if morning_utc is None or evening_utc is None:
+          if civil_dawn_utc is None or civil_dusk_utc is None:
 
               print("")
-              print("==========================================")
-              print("IMPOSSIBILE CALCOLARE IL CREPUSCOLO")
-              print("Per sicurezza NON acquisisco l'immagine.")
-              print("==========================================")
+              print("ERRORE: impossibile calcolare")
+              print("il crepuscolo civile.")
+              print("Per sicurezza il download viene saltato.")
 
-              with open(os.environ["GITHUB_ENV"], "a") as f:
-                  f.write("SHOULD_DOWNLOAD=false\n")
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+                  output.write("download=false\n")
 
-              sys.exit(0)
-
-
-          morning = morning_utc.astimezone(tz)
-          evening = evening_utc.astimezone(tz)
+              raise SystemExit(0)
 
 
-          # --------------------------------------------------------
-          # Finestra di acquisizione
-          #
-          # Dall'inizio del crepuscolo civile mattutino
-          # alla fine del crepuscolo civile serale.
-          # --------------------------------------------------------
+          civil_dawn = civil_dawn_utc.astimezone(local_tz)
+          civil_dusk = civil_dusk_utc.astimezone(local_tz)
 
-          acquisition_start = morning
-          acquisition_end = evening
 
+          # ========================================================
+          # Visualizzazione
+          # ========================================================
 
           print("")
           print("==========================================")
@@ -242,50 +274,51 @@ jobs:
           print("==========================================")
           print(
               "Inizio crepuscolo civile: "
-              f"{morning.strftime('%H:%M:%S')}"
+              + civil_dawn.strftime("%H:%M:%S")
           )
           print(
               "Fine crepuscolo civile:   "
-              f"{evening.strftime('%H:%M:%S')}"
-          )
-          print("")
-          print(
-              "Finestra acquisizione:    "
-              f"{morning.strftime('%H:%M')} - "
-              f"{evening.strftime('%H:%M')}"
+              + civil_dusk.strftime("%H:%M:%S")
           )
           print("==========================================")
-          print("")
 
 
-          # --------------------------------------------------------
-          # Controllo ora corrente
-          # --------------------------------------------------------
+          # ========================================================
+          # Controllo finestra
+          # ========================================================
 
-          if acquisition_start <= now <= acquisition_end:
+          if civil_dawn <= now <= civil_dusk:
 
-              print("OK: siamo nel crepuscolo/periodo diurno.")
-              print("Procedo con il download della webcam.")
+              print("")
+              print("OK: finestra di acquisizione attiva.")
+              print("La webcam verrà scaricata.")
 
-              with open(os.environ["GITHUB_ENV"], "a") as f:
-                  f.write("SHOULD_DOWNLOAD=true\n")
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+                  output.write("download=true\n")
 
           else:
 
-              print("NOTTE: siamo fuori dalla finestra utile.")
-              print("Non scarico la webcam.")
+              print("")
+              print("NOTTE: fuori dalla finestra.")
+              print("La webcam NON verrà scaricata.")
 
-              with open(os.environ["GITHUB_ENV"], "a") as f:
-                  f.write("SHOULD_DOWNLOAD=false\n")
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+                  output.write("download=false\n")
 
           PY
 
 
-      # ------------------------------------------------------------
-      # 2. Scarica immagine webcam
-      # ------------------------------------------------------------
+      # ============================================================
+      # 2. SCARICA WEBCAM
+      # ============================================================
       - name: Scarica immagine webcam
-        if: env.SHOULD_DOWNLOAD == 'true'
+        if: steps.sunlight.outputs.download == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -297,10 +330,13 @@ jobs:
           IMG_PATH="webcam/webcam_${TS}.jpg"
 
           echo "=========================================="
-          echo "Data/ora italiana: $(date)"
-          echo "URL: $IMG_URL"
-          echo "File: $IMG_PATH"
+          echo "DOWNLOAD WEBCAM"
           echo "=========================================="
+          echo "Data/ora: $TS"
+          echo "URL:     $IMG_URL"
+          echo "File:    $IMG_PATH"
+          echo "=========================================="
+
 
           curl \
             --location \
@@ -314,36 +350,51 @@ jobs:
             -o "$IMG_PATH" \
             "$IMG_URL"
 
+
+          # --------------------------------------------------------
+          # Controllo file
+          # --------------------------------------------------------
+
           if [ ! -s "$IMG_PATH" ]; then
             echo "ERRORE: immagine vuota."
             exit 1
           fi
 
+
           FILE_TYPE=$(file -b "$IMG_PATH")
 
           echo "Tipo file: $FILE_TYPE"
 
+
           if ! echo "$FILE_TYPE" | grep -qiE 'JPEG|JPG'; then
-            echo "ERRORE: il file scaricato non sembra essere un JPEG."
+            echo "ERRORE: il file non sembra essere un JPEG."
             exit 1
           fi
 
-          SHA256=$(sha256sum "$IMG_PATH" | awk '{print $1}')
 
-          echo "SHA256 nuova immagine: $SHA256"
+          IMG_SHA256=$(sha256sum "$IMG_PATH" | awk '{print $1}')
+
+          echo ""
+          echo "SHA256: $IMG_SHA256"
+
 
           echo "IMG_PATH=$IMG_PATH" >> "$GITHUB_ENV"
-          echo "IMG_SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "IMG_SHA256=$IMG_SHA256" >> "$GITHUB_ENV"
 
 
-      # ------------------------------------------------------------
-      # 3. Gestione Release + archivio giornaliero
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. ARCHIVIA
+      # ============================================================
       - name: Archivia immagine
-        if: env.SHOULD_DOWNLOAD == 'true'
+        if: steps.sunlight.outputs.download == 'true'
         shell: bash
         run: |
           set -euo pipefail
+
+
+          # --------------------------------------------------------
+          # Configurazione
+          # --------------------------------------------------------
 
           MAX_SIZE=$((80 * 1024 * 1024))
 
@@ -355,22 +406,295 @@ jobs:
 
           BASE_NAME="webcam_${TODAY}"
 
+
+          echo "=========================================="
+          echo "ARCHIVIAZIONE"
           echo "=========================================="
           echo "Giorno:        $TODAY"
           echo "Mese:          $MONTH"
           echo "Release:       $RELEASE_TAG"
           echo "Archivio base: $BASE_NAME"
-          echo "Limite ZIP:    80 MB"
+          echo "Limite ZIP:    80 MiB"
           echo "=========================================="
 
 
-          # --------------------------------------------------------
-          # 4. Crea Release mensile se non esiste
-          # --------------------------------------------------------
+          # ========================================================
+          # Crea Release mensile
+          # ========================================================
 
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
 
-            echo "La Release $RELEASE_TAG non esiste."
-            echo "La creo..."
+            echo "Release non esistente."
+            echo "Creo $RELEASE_TAG..."
 
-            gh release
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "Archivio webcam del mese ${MONTH}." \
+              --latest=false
+
+            echo "Release creata."
+
+          else
+
+            echo "Release già esistente."
+
+          fi
+
+
+          # ========================================================
+          # Trova ultimo ZIP del giorno
+          # ========================================================
+
+          ASSETS_JSON=$(
+            gh release view "$RELEASE_TAG" --json assets
+          )
+
+
+          LAST_PART=$(
+            echo "$ASSETS_JSON" |
+            jq -r '.assets[].name' |
+            grep -E "^${BASE_NAME}_part[0-9]+\.zip$" |
+            sort -V |
+            tail -n 1 || true
+          )
+
+
+          if [ -z "$LAST_PART" ]; then
+
+            echo "Nessun archivio per oggi."
+
+          else
+
+            echo "Ultimo archivio: $LAST_PART"
+
+          fi
+
+
+          # ========================================================
+          # Se esiste ZIP, controlla duplicato
+          # ========================================================
+
+          if [ -n "$LAST_PART" ]; then
+
+            mkdir -p current_archive
+
+            echo "Scarico $LAST_PART..."
+
+            gh release download "$RELEASE_TAG" \
+              --pattern "$LAST_PART" \
+              --dir current_archive \
+              --clobber
+
+
+            CURRENT_ZIP="current_archive/$LAST_PART"
+
+
+            # ------------------------------------------------------
+            # Trova ultima immagine
+            # ------------------------------------------------------
+
+            LAST_IMAGE=$(
+              unzip -Z1 "$CURRENT_ZIP" |
+              grep -Ei '\.jpg$' |
+              sort |
+              tail -n 1 || true
+            )
+
+
+            if [ -n "$LAST_IMAGE" ]; then
+
+              echo "Ultima immagine: $LAST_IMAGE"
+
+
+              OLD_SHA256=$(
+                unzip -p "$CURRENT_ZIP" "$LAST_IMAGE" |
+                sha256sum |
+                awk '{print $1}'
+              )
+
+
+              echo "SHA256 precedente: $OLD_SHA256"
+              echo "SHA256 attuale:    $IMG_SHA256"
+
+
+              if [ "$OLD_SHA256" = "$IMG_SHA256" ]; then
+
+                echo ""
+                echo "=========================================="
+                echo "IMMAGINE DUPLICATA"
+                echo "Nessuna modifica alla Release."
+                echo "=========================================="
+
+
+                rm -rf webcam current_archive
+
+                exit 0
+
+              fi
+
+            fi
+
+          fi
+
+
+          # ========================================================
+          # Nessun archivio -> crea part1
+          # ========================================================
+
+          if [ -z "$LAST_PART" ]; then
+
+            ZIP_FILE="${BASE_NAME}_part1.zip"
+
+            echo ""
+            echo "Creo: $ZIP_FILE"
+
+
+            zip -9 -j "$ZIP_FILE" "$IMG_PATH"
+
+
+            SIZE=$(stat -c%s "$ZIP_FILE")
+
+            echo "Dimensione: $SIZE byte"
+
+
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+
+              echo "ERRORE: immagine superiore a 80 MiB."
+
+              exit 1
+
+            fi
+
+
+            echo "Carico nella Release..."
+
+            gh release upload \
+              "$RELEASE_TAG" \
+              "$ZIP_FILE"
+
+
+            echo "Upload completato."
+
+
+            rm -rf webcam current_archive
+            rm -f "$ZIP_FILE"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # Prova ad aggiungere all'ultimo ZIP
+          # ========================================================
+
+          TEST_ZIP="test_${LAST_PART}"
+
+          cp "$CURRENT_ZIP" "$TEST_ZIP"
+
+
+          zip -9 -j "$TEST_ZIP" "$IMG_PATH" >/dev/null
+
+
+          TEST_SIZE=$(stat -c%s "$TEST_ZIP")
+
+
+          echo ""
+          echo "Dimensione dopo aggiunta:"
+          echo "$TEST_SIZE byte"
+
+
+          # ========================================================
+          # ZIP ancora sotto 80 MiB
+          # ========================================================
+
+          if [ "$TEST_SIZE" -le "$MAX_SIZE" ]; then
+
+            echo ""
+            echo "L'archivio è ancora sotto 80 MiB."
+            echo "Aggiorno $LAST_PART..."
+
+
+            gh release upload \
+              "$RELEASE_TAG" \
+              "$TEST_ZIP" \
+              --clobber
+
+
+            echo "Archivio aggiornato."
+
+
+            rm -rf webcam current_archive
+            rm -f "$TEST_ZIP"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # ZIP oltre 80 MiB -> nuovo part
+          # ========================================================
+
+          CURRENT_PART=$(
+            echo "$LAST_PART" |
+            sed -E 's/.*_part([0-9]+)\.zip/\1/'
+          )
+
+
+          NEXT_PART=$((CURRENT_PART + 1))
+
+
+          NEW_ZIP="${BASE_NAME}_part${NEXT_PART}.zip"
+
+
+          echo ""
+          echo "=========================================="
+          echo "LIMITE 80 MiB RAGGIUNTO"
+          echo "Creo: $NEW_ZIP"
+          echo "=========================================="
+
+
+          zip -9 -j "$NEW_ZIP" "$IMG_PATH"
+
+
+          NEW_SIZE=$(stat -c%s "$NEW_ZIP")
+
+
+          echo "Dimensione nuovo ZIP:"
+          echo "$NEW_SIZE byte"
+
+
+          if [ "$NEW_SIZE" -gt "$MAX_SIZE" ]; then
+
+            echo "ERRORE: singola immagine superiore a 80 MiB."
+
+            exit 1
+
+          fi
+
+
+          # ========================================================
+          # Upload nuovo part
+          # ========================================================
+
+          gh release upload \
+            "$RELEASE_TAG" \
+            "$NEW_ZIP"
+
+
+          echo ""
+          echo "=========================================="
+          echo "NUOVO ARCHIVIO CARICATO"
+          echo "$NEW_ZIP"
+          echo "=========================================="
+
+
+          # ========================================================
+          # Pulizia
+          # ========================================================
+
+          rm -rf webcam current_archive
+          rm -f "$TEST_ZIP" "$NEW_ZIP"
+
+          echo "Pulizia completata."
