@@ -2,7 +2,7 @@ name: Save Webcam Image
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/28 * * * *"
   workflow_dispatch:
 
 concurrency:
